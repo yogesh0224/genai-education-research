@@ -1,0 +1,14 @@
+<h1>Select Rubric</h1>
+<p><b>Assignment:</b> {{ assignment.title }}</p>
+
+<ul>
+  {% for r in rubrics %}
+    <li>
+      <a href="{% url 'rubrics:scoring_queue' assignment.id r.id %}">
+        {{ r.name }}
+      </a>
+    </li>
+  {% empty %}
+    <li>No rubric found for this assignment. Create one in admin first.</li>
+  {% endfor %}
+</ul>

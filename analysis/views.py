@@ -1,0 +1,326 @@
+# analysis/views.py
+
+import csv
+from pathlib import Path
+
+from django.conf import settings
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404, redirect, render
+
+from accounts.decorators import role_required
+from analysis.models import (
+    AnalysisRun,
+    ClusteringResult,
+    ModelArtifact,
+    SubmissionFeatures,
+)
+from analysis.training import train_regression_models
+from rubrics.aggregation import aggregate_rubric_scores
+from rubrics.models import Rubric, RubricCriterion
+from analysis.models import ClusterProfile
+
+def _to_media_url(file_path: str) -> str:
+    """
+    Convert an absolute or relative file path to a URL under MEDIA_URL if possible.
+    Returns "" if it cannot be mapped.
+    """
+    if not file_path:
+        return ""
+
+    try:
+        p = Path(file_path)
+
+        # If already a relative media path like "artifacts/<run>/file.png"
+        if not p.is_absolute():
+            return settings.MEDIA_URL.rstrip("/") + "/" + str(p).replace("\\", "/")
+
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        rel = p.resolve().relative_to(media_root)
+        return settings.MEDIA_URL.rstrip("/") + "/" + str(rel).replace("\\", "/")
+    except Exception:
+        return ""
+
+
+@login_required
+@role_required({"ADMIN", "RESEARCHER"})
+def run_dashboard(request, run_id):
+    run = get_object_or_404(AnalysisRun, id=run_id)
+
+    # -----------------------------
+    # Rubric selection
+    # -----------------------------
+    rubrics = Rubric.objects.filter(assignment_id=run.assignment_id).order_by("id")
+
+    default_rubric_id = rubrics.first().id if rubrics.exists() else None
+    viz_rubric_id = int(request.GET.get("rubric_id", default_rubric_id))
+
+    # -----------------------------
+    # Artifacts
+    # -----------------------------
+    artifacts = ModelArtifact.objects.filter(
+        analysis_run=run
+    ).order_by("-created_at")
+
+    artifact_rows = []
+    for a in artifacts:
+        m = a.metrics or {}
+        cv = m.get("cv_metrics", {})
+
+        artifact_rows.append({
+            "name": a.name,
+            "mae": cv.get("mae_mean"),
+            "rmse": cv.get("rmse_mean"),
+            "r2": cv.get("r2_mean"),
+            "model_url": m.get("paths", {}).get("model"),
+            "pred_url": m.get("paths", {}).get("pred_vs_actual"),
+            "fi_url": m.get("paths", {}).get("feature_importance"),
+        })
+
+    # -----------------------------
+    # Rubric aggregation (depth + AI use)
+    # -----------------------------
+    label_map = {}
+    if viz_rubric_id:
+        targets = aggregate_rubric_scores(
+            assignment_id=run.assignment_id,
+            rubric_id=viz_rubric_id,
+        )
+        for t in targets:
+            label_map[t["submission_id"]] = {
+                "depth": t.get("depth_score_mean"),
+                "ai_use": t.get("self_report_ai_use"),
+            }
+
+    # -----------------------------
+    # Centroid similarity lookup
+    # -----------------------------
+    sim_lookup = {}
+    for f in SubmissionFeatures.objects.filter(analysis_run=run):
+        sim = (f.features or {}).get("centroid_similarity")
+        if sim is not None:
+            sim_lookup[str(f.submission_id)] = float(sim)
+
+    # -----------------------------
+    # Cluster labels (human-readable)
+    # -----------------------------
+    label_lookup = {}
+    if viz_rubric_id:
+        for cp in ClusterProfile.objects.filter(
+            analysis_run=run,
+            rubric_id=viz_rubric_id,
+        ):
+            label_lookup[int(cp.cluster)] = cp.label
+
+    # -----------------------------
+    # Build cluster points
+    # -----------------------------
+    clusters_qs = ClusteringResult.objects.filter(
+        analysis_run=run
+    ).order_by("cluster", "submission_id")
+
+    cluster_points = []
+    for c in clusters_qs:
+        sid = str(c.submission_id)
+
+        cluster_label = label_lookup.get(
+            int(c.cluster), f"Cluster {c.cluster}"
+        )
+
+        info = label_map.get(sid, {})
+
+        cluster_points.append({
+            "submission_id": sid,
+            "student": c.student_anon_id,
+            "cluster": int(c.cluster),
+            "cluster_label": cluster_label,
+            "x": c.umap_x,
+            "y": c.umap_y,
+            "depth": info.get("depth"),
+            "ai_use": info.get("ai_use"),
+            "centroid_similarity": sim_lookup.get(sid),
+        })
+
+    # -----------------------------
+    # Cluster summary (counts + means)
+    # -----------------------------
+    summary = {}
+    for p in cluster_points:
+        c = p["cluster"]
+        if c not in summary:
+            summary[c] = {
+                "cluster": c,
+                "count": 0,
+                "students": set(),
+                "depth_vals": [],
+                "ai_vals": [],
+                "sim_vals": [],
+                "label": p["cluster_label"],
+            }
+
+        summary[c]["count"] += 1
+        summary[c]["students"].add(p["student"])
+
+        if p["depth"] is not None:
+            summary[c]["depth_vals"].append(float(p["depth"]))
+        if p["ai_use"] is not None:
+            summary[c]["ai_vals"].append(float(p["ai_use"]))
+        if p["centroid_similarity"] is not None:
+            summary[c]["sim_vals"].append(float(p["centroid_similarity"]))
+
+    cluster_summary = []
+    for c in sorted(summary.keys()):
+        item = summary[c]
+        cluster_summary.append({
+            "cluster": item["cluster"],
+            "label": item["label"],
+            "count": item["count"],
+            "unique_students": len(item["students"]),
+            "depth_mean": (
+                sum(item["depth_vals"]) / len(item["depth_vals"])
+                if item["depth_vals"] else None
+            ),
+            "ai_use_mean": (
+                sum(item["ai_vals"]) / len(item["ai_vals"])
+                if item["ai_vals"] else None
+            ),
+            "sim_mean": (
+                sum(item["sim_vals"]) / len(item["sim_vals"])
+                if item["sim_vals"] else None
+            ),
+        })
+
+    return render(
+        request,
+        "analysis/run_dashboard.html",
+        {
+            "run": run,
+            "rubrics": rubrics,
+            "viz_rubric_id": viz_rubric_id,
+            "artifact_rows": artifact_rows,
+            "cluster_points": cluster_points,
+            "cluster_summary": cluster_summary,
+        },
+    )
+
+
+@login_required
+@role_required({"ADMIN", "RESEARCHER"})
+def retrain_run(request, run_id):
+    if request.method != "POST":
+        return redirect("analysis:run_dashboard", run_id=run_id)
+
+    try:
+        run = get_object_or_404(
+            AnalysisRun.objects.select_related("assignment", "assignment__course"),
+            id=run_id
+        )
+    except Exception:
+        run = get_object_or_404(AnalysisRun, id=run_id)
+
+    rubric_id_raw = request.POST.get("rubric_id")
+    target = (request.POST.get("target") or "depth_score_mean").strip()
+
+    if not rubric_id_raw:
+        messages.error(request, "Missing rubric_id.")
+        return redirect("analysis:run_dashboard", run_id=run_id)
+
+    rubric_id = int(rubric_id_raw)
+
+    if not Rubric.objects.filter(id=rubric_id, assignment_id=run.assignment_id).exists():
+        messages.error(request, "Selected rubric does not belong to this run's assignment.")
+        return redirect("analysis:run_dashboard", run_id=run_id)
+
+    # Optional knobs
+    n_splits = int(request.POST.get("n_splits") or 5)
+    random_state = int(request.POST.get("random_state") or 42)
+
+    try:
+        run.status = AnalysisRun.Status.RUNNING
+        run.error_message = ""
+        run.save(update_fields=["status", "error_message"])
+
+        train_regression_models(
+            run=run,
+            rubric_id=rubric_id,
+            target=target,
+            n_splits=n_splits,
+            random_state=random_state,
+        )
+
+        run.status = AnalysisRun.Status.DONE
+        run.save(update_fields=["status"])
+        messages.success(request, f"Retraining complete. Target={target}, Rubric={rubric_id}")
+
+    except Exception as e:
+        run.status = AnalysisRun.Status.FAILED
+        run.error_message = str(e)
+        run.save(update_fields=["status", "error_message"])
+        messages.error(request, f"Retraining failed: {e}")
+
+    return redirect("analysis:run_dashboard", run_id=run_id)
+
+
+@login_required
+@role_required({"ADMIN", "RESEARCHER"})
+def export_joined_ml_dataset(request, run_id):
+    """
+    Joined export: rubric aggregated targets + SubmissionFeatures.features for this run.
+    URL: /export/joined/<run_uuid>.csv?rubric_id=2
+    """
+    run = get_object_or_404(AnalysisRun, id=run_id)
+
+    rubric_id_raw = request.GET.get("rubric_id")
+    if not rubric_id_raw:
+        return HttpResponse("Missing rubric_id query param, e.g. ?rubric_id=2", status=400)
+    rubric_id = int(rubric_id_raw)
+
+    if not Rubric.objects.filter(id=rubric_id, assignment_id=run.assignment_id).exists():
+        return HttpResponse("Rubric does not belong to this assignment.", status=400)
+
+    # Targets
+    targets = aggregate_rubric_scores(assignment_id=run.assignment_id, rubric_id=rubric_id)
+    target_map = {t["submission_id"]: t for t in targets}
+
+    criteria = list(RubricCriterion.objects.filter(rubric_id=rubric_id).order_by("order", "id"))
+    criterion_cols = [f"crit_{c.id}_mean" for c in criteria]
+
+    base_cols = [
+        "submission_id", "assignment_id", "rubric_id", "student_anon_id",
+        "submitted_at", "self_report_ai_use", "word_count",
+        "total_score_mean", "total_score_weighted_mean", "depth_score_mean",
+    ]
+    target_cols = base_cols + criterion_cols
+
+    feats_qs = SubmissionFeatures.objects.filter(analysis_run=run).order_by("created_at")
+
+    # Choose feature keys from first row (assumes consistent keys)
+    first = feats_qs.first()
+    feature_keys = sorted((first.features or {}).keys()) if first else []
+    feature_cols = [f"feat_{k}" for k in feature_keys]
+
+    fieldnames = target_cols + feature_cols
+
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="joined_ml_run_{run_id}_rubric_{rubric_id}.csv"'
+
+    writer = csv.DictWriter(response, fieldnames=fieldnames)
+    writer.writeheader()
+
+    written = 0
+    for f in feats_qs:
+        sid = str(f.submission_id)
+        t = target_map.get(sid)
+        if not t:
+            continue
+
+        row = {k: t.get(k, "") for k in target_cols}
+        feats = f.features or {}
+        for k in feature_keys:
+            row[f"feat_{k}"] = feats.get(k, "")
+
+        writer.writerow(row)
+        written += 1
+
+    return response

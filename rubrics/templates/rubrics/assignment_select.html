@@ -1,0 +1,10 @@
+<h1>Select Assignment</h1>
+<ul>
+  {% for a in assignments %}
+    <li>
+      <a href="{% url 'rubrics:rubric_select' a.id %}">
+        {{ a.course.name }} — {{ a.title }}
+      </a>
+    </li>
+  {% endfor %}
+</ul>

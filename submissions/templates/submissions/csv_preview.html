@@ -1,0 +1,33 @@
+<h1>Preview Import</h1>
+
+{% if errors %}
+  <h3>Errors (fix these before importing)</h3>
+  <ul>
+    {% for e in errors %}
+      <li>{{ e }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+<h3>Preview rows</h3>
+<table border="1" cellpadding="6">
+  <tr>
+    <th>anon_id</th>
+    <th>text (first 120 chars)</th>
+    <th>submitted_at</th>
+    <th>self_report_ai_use</th>
+  </tr>
+  {% for r in preview %}
+    <tr>
+      <td>{{ r.anon_id }}</td>
+      <td>{{ r.text|slice:":120" }}</td>
+      <td>{{ r.submitted_at }}</td>
+      <td>{{ r.self_report_ai_use }}</td>
+    </tr>
+  {% endfor %}
+</table>
+
+<form method="post">
+  {% csrf_token %}
+  <button type="submit" {% if errors %}disabled{% endif %}>Import</button>
+</form>

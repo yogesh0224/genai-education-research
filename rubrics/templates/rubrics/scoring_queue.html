@@ -1,0 +1,33 @@
+<h1>Scoring Queue</h1>
+<p><b>Assignment:</b> {{ assignment.title }}</p>
+<p><b>Rubric:</b> {{ rubric.name }}</p>
+<p><b>Remaining for you:</b> {{ remaining }}</p>
+
+{% if next_submission %}
+  <p>
+    <a href="{% url 'rubrics:score_submission' assignment.id rubric.id next_submission.id %}">
+      Start / Continue Scoring (Next Submission)
+    </a>
+  </p>
+{% endif %}
+
+<table border="1" cellpadding="6">
+  <tr>
+    <th>Student</th>
+    <th>Status</th>
+    <th>Progress</th>
+    <th>Action</th>
+  </tr>
+  {% for item in queue %}
+    <tr>
+      <td>{{ item.submission.student.anon_id }}</td>
+      <td>{% if item.done %}✅ Done{% else %}⏳ Pending{% endif %}</td>
+      <td>{{ item.count }}/{{ item.total }}</td>
+      <td>
+        <a href="{% url 'rubrics:score_submission' assignment.id rubric.id item.submission.id %}">
+          Score
+        </a>
+      </td>
+    </tr>
+  {% endfor %}
+</table>

@@ -1,0 +1,8 @@
+<h1>Map CSV Columns</h1>
+<p>CSV columns detected: {{ columns|join:", " }}</p>
+
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Next: Preview</button>
+</form>

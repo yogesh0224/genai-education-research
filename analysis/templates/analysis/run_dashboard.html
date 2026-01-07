@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Analysis Run Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+
+<h1>Analysis Run Dashboard</h1>
+
+<p><b>Run ID:</b> {{ run.id }}</p>
+<p><b>Assignment:</b> {{ run.assignment }}</p>
+
+<hr/>
+
+<h3>Artifacts</h3>
+
+{% if artifact_rows %}
+<table border="1" cellpadding="8">
+  <tr>
+    <th>Name</th>
+    <th>MAE</th>
+    <th>RMSE</th>
+    <th>R²</th>
+    <th>Pred vs Actual</th>
+    <th>Feature Importance</th>
+  </tr>
+  {% for a in artifact_rows %}
+  <tr>
+    <td>{{ a.name }}</td>
+    <td>{{ a.mae|floatformat:3 }}</td>
+    <td>{{ a.rmse|floatformat:3 }}</td>
+    <td>{{ a.r2|floatformat:3 }}</td>
+    <td>
+      {% if a.pred_url %}
+        <img src="{{ a.pred_url }}" style="max-width:300px;">
+      {% endif %}
+    </td>
+    <td>
+      {% if a.fi_url %}
+        <img src="{{ a.fi_url }}" style="max-width:300px;">
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>No artifacts yet.</p>
+{% endif %}
+
+<hr/>
+
+<h3>UMAP: Learning Behavior Clusters</h3>
+
+<p>
+  <b>Color by:</b>
+  <select id="colorBy">
+    <option value="cluster">Cluster ID</option>
+    <option value="label">Cluster label</option>
+    <option value="depth">Depth score</option>
+    <option value="ai_use">AI use</option>
+  </select>
+
+  &nbsp;&nbsp;
+
+  <b>Filter cluster:</b>
+  <select id="clusterFilter">
+    <option value="all">All</option>
+  </select>
+</p>
+
+<div id="umapPlot" style="width:100%; max-width:900px; height:520px;"></div>
+
+{{ cluster_points|json_script:"cluster-data" }}
+
+<script>
+const points = JSON.parse(document.getElementById("cluster-data").textContent);
+
+const colorByEl = document.getElementById("colorBy");
+const filterEl = document.getElementById("clusterFilter");
+
+// populate filter
+[...new Set(points.map(p => p.cluster))].sort().forEach(c => {
+  const o = document.createElement("option");
+  o.value = c;
+  o.textContent = "Cluster " + c;
+  filterEl.appendChild(o);
+});
+
+function filteredPoints() {
+  if (filterEl.value === "all") return points;
+  return points.filter(p => p.cluster == filterEl.value);
+}
+
+function renderPlot() {
+  const mode = colorByEl.value;
+  const pts = filteredPoints();
+
+  if (mode === "label") {
+    const labels = [...new Set(pts.map(p => p.cluster_label))];
+    const traces = labels.map(lbl => {
+      const sub = pts.filter(p => p.cluster_label === lbl);
+      return {
+        x: sub.map(p => p.x),
+        y: sub.map(p => p.y),
+        mode: "markers",
+        type: "scatter",
+        name: lbl,
+        marker: { size: 10 },
+        text: sub.map(p =>
+          `Submission: ${p.submission_id}<br>
+           Student: ${p.student}<br>
+           ${lbl}<br>
+           Depth: ${p.depth}<br>
+           AI use: ${p.ai_use}<br>
+           Centroid sim: ${p.centroid_similarity}`
+        ),
+        hoverinfo: "text"
+      };
+    });
+    Plotly.react("umapPlot", traces, { title: "UMAP Projection" });
+    return;
+  }
+
+  Plotly.react("umapPlot", [{
+    x: pts.map(p => p.x),
+    y: pts.map(p => p.y),
+    mode: "markers",
+    type: "scatter",
+    marker: {
+      size: 10,
+      color: pts.map(p => p[mode]),
+      colorscale: "Viridis",
+      showscale: true
+    },
+    text: pts.map(p =>
+      `Submission: ${p.submission_id}<br>
+       Student: ${p.student}<br>
+       ${p.cluster_label}<br>
+       Depth: ${p.depth}<br>
+       AI use: ${p.ai_use}<br>
+       Centroid sim: ${p.centroid_similarity}`
+    ),
+    hoverinfo: "text"
+  }], { title: "UMAP Projection" });
+}
+
+renderPlot();
+colorByEl.onchange = renderPlot;
+filterEl.onchange = renderPlot;
+</script>
+
+<hr/>
+
+<h3>Cluster Summary</h3>
+
+<table border="1" cellpadding="8">
+  <tr>
+    <th>Cluster</th>
+    <th>Label</th>
+    <th># Submissions</th>
+    <th># Students</th>
+    <th>Mean Depth</th>
+    <th>Mean AI Use</th>
+    <th>Mean Centroid Similarity</th>
+  </tr>
+  {% for r in cluster_summary %}
+  <tr data-cluster="{{ r.cluster }}">
+    <td>{{ r.cluster }}</td>
+    <td>{{ r.label }}</td>
+    <td>{{ r.count }}</td>
+    <td>{{ r.unique_students }}</td>
+    <td>{{ r.depth_mean|floatformat:2 }}</td>
+    <td>{{ r.ai_use_mean|floatformat:2 }}</td>
+    <td>{{ r.sim_mean|floatformat:3 }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+</body>
+</html>

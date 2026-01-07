@@ -1,0 +1,22 @@
+<h1>Score Submission</h1>
+<p><b>Assignment:</b> {{ assignment.title }}</p>
+<p><b>Rubric:</b> {{ rubric.name }}</p>
+<p><b>Student:</b> {{ submission.student.anon_id }}</p>
+
+<hr />
+<h3>Submission Text</h3>
+<div style="white-space: pre-wrap; border:1px solid #ddd; padding:10px;">
+  {{ submission.text }}
+</div>
+
+<hr />
+<h3>Rubric Scores</h3>
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Save & Next</button>
+</form>
+
+<p>
+  <a href="{% url 'rubrics:scoring_queue' assignment.id rubric.id %}">Back to Queue</a>
+</p>
