@@ -2,6 +2,8 @@
 <html>
 <head>
   <title>Run Comparison</title>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+
 </head>
 <body>
 
@@ -89,6 +91,64 @@
 {% else %}
   <p>No runs found.</p>
 {% endif %}
+
+<hr/>
+<h2>Run Comparison Plot (CV R² mean over time)</h2>
+
+{% if plot_points %}
+  <div id="r2Plot" style="width:100%; max-width:1100px; height:520px;"></div>
+
+  {{ plot_points|json_script:"plot-data" }}
+
+  <script>
+    const points = JSON.parse(document.getElementById("plot-data").textContent);
+
+    // Group points by series (model:target)
+    const bySeries = {};
+    for (const p of points) {
+      if (!bySeries[p.series]) bySeries[p.series] = [];
+      bySeries[p.series].push(p);
+    }
+
+    // Sort each series by time
+    for (const s in bySeries) {
+      bySeries[s].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    }
+
+    // Build traces
+    const traces = Object.keys(bySeries).sort().map(seriesName => {
+      const arr = bySeries[seriesName];
+      return {
+        name: seriesName,
+        x: arr.map(p => p.timestamp),
+        y: arr.map(p => p.r2_mean),
+        mode: "lines+markers",
+        type: "scatter",
+        hoverinfo: "text",
+        text: arr.map(p => (
+          `Series: ${p.series}<br>` +
+          `Run: ${p.run_id}<br>` +
+          `R² mean: ${p.r2_mean}` +
+          (p.r2_std != null ? `<br>R² std: ${p.r2_std}` : "") +
+          `<br>Time: ${p.timestamp}`
+        ))
+      };
+    });
+
+    const layout = {
+      title: "CV R² mean over time",
+      xaxis: { title: "Run time", type: "date" },
+      yaxis: { title: "R² mean", rangemode: "tozero" },
+      hovermode: "closest",
+      legend: { orientation: "h" }
+    };
+
+    Plotly.newPlot("r2Plot", traces, layout);
+  </script>
+{% else %}
+  <p>No plot data found yet (no artifacts with CV metrics).</p>
+{% endif %}
+
 
 </body>
 </html>

@@ -517,8 +517,34 @@ def compare_runs(request):
             "assignment_display": assignment_display,
             "artifacts": artifacts_view,
         })
+        # ---- Build plot data for Plotly ----
+    plot_points = []
+    for row in rows:
+        r = row["run"]
+
+        # Prefer created_at; fallback to started_at
+        ts = getattr(r, "created_at", None) or getattr(r, "started_at", None)
+        if not ts:
+            continue
+
+        for a in row["artifacts"]:
+            # Only plot if we have r2_mean
+            if a.get("r2_mean") is None:
+                continue
+
+            plot_points.append({
+                "run_id": str(r.id),
+                "timestamp": ts.isoformat(),
+                "model": a["model"],
+                "target": a["target"],
+                "series": f'{a["model"]}:{a["target"]}',
+                "r2_mean": a["r2_mean"],
+                "r2_std": a.get("r2_std"),
+            })
+
 
     return render(request, "analysis/compare_runs.html", {
         "rows": rows,
         "assignment_id": assignment_id or "",
+        "plot_points":plot_points,
     })
