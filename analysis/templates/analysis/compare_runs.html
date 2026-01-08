@@ -96,6 +96,13 @@
 <h2>Run Comparison Plot (CV R² mean over time)</h2>
 
 {% if plot_points %}
+  <p>
+    <b>Show series:</b>
+    <select id="seriesFilter">
+      <option value="__all__" selected>All</option>
+    </select>
+  </p>
+
   <div id="r2Plot" style="width:100%; max-width:1100px; height:520px;"></div>
 
   {{ plot_points|json_script:"plot-data" }}
@@ -115,35 +122,60 @@
       bySeries[s].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     }
 
-    // Build traces
-    const traces = Object.keys(bySeries).sort().map(seriesName => {
-      const arr = bySeries[seriesName];
-      return {
-        name: seriesName,
-        x: arr.map(p => p.timestamp),
-        y: arr.map(p => p.r2_mean),
-        mode: "lines+markers",
-        type: "scatter",
-        hoverinfo: "text",
-        text: arr.map(p => (
-          `Series: ${p.series}<br>` +
-          `Run: ${p.run_id}<br>` +
-          `R² mean: ${p.r2_mean}` +
-          (p.r2_std != null ? `<br>R² std: ${p.r2_std}` : "") +
-          `<br>Time: ${p.timestamp}`
-        ))
+    const filterEl = document.getElementById("seriesFilter");
+
+    // Populate dropdown
+    const seriesNames = Object.keys(bySeries).sort();
+    for (const s of seriesNames) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      filterEl.appendChild(opt);
+    }
+
+    function buildTraces(selected) {
+      const names = (selected === "__all__") ? seriesNames : [selected];
+
+      return names.map(seriesName => {
+        const arr = bySeries[seriesName] || [];
+        return {
+          name: seriesName,
+          x: arr.map(p => p.timestamp),
+          y: arr.map(p => p.r2_mean),
+          mode: "lines+markers",
+          type: "scatter",
+          hoverinfo: "text",
+          text: arr.map(p => (
+            `Series: ${p.series}<br>` +
+            `Run: ${p.run_id}<br>` +
+            `R² mean: ${p.r2_mean}` +
+            (p.r2_std != null ? `<br>R² std: ${p.r2_std}` : "") +
+            `<br>Time: ${p.timestamp}`
+          ))
+        };
+      });
+    }
+
+    function renderPlot() {
+      const selected = filterEl.value;
+      const traces = buildTraces(selected);
+
+      const layout = {
+        title: (selected === "__all__") ? "CV R² mean over time (All series)" : `CV R² mean over time (${selected})`,
+        xaxis: { title: "Run time", type: "date" },
+        yaxis: { title: "R² mean", rangemode: "tozero" },
+        hovermode: "closest",
+        legend: { orientation: "h" }
       };
-    });
 
-    const layout = {
-      title: "CV R² mean over time",
-      xaxis: { title: "Run time", type: "date" },
-      yaxis: { title: "R² mean", rangemode: "tozero" },
-      hovermode: "closest",
-      legend: { orientation: "h" }
-    };
+      Plotly.react("r2Plot", traces, layout);
+    }
 
-    Plotly.newPlot("r2Plot", traces, layout);
+    // Initial render
+    renderPlot();
+
+    // Filter handler
+    filterEl.addEventListener("change", renderPlot);
   </script>
 {% else %}
   <p>No plot data found yet (no artifacts with CV metrics).</p>
