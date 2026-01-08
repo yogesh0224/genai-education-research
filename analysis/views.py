@@ -2,7 +2,7 @@
 import json
 import csv
 from pathlib import Path
-
+import pandas as pd
 
 from django.conf import settings
 from django.contrib import messages
@@ -48,287 +48,312 @@ def _to_media_url(file_path: str) -> str:
 @login_required
 @role_required({"ADMIN", "RESEARCHER"})
 def run_dashboard(request, run_id):
-    # ------------------------------------------------------------
-    # Load run + rubrics
-    # ------------------------------------------------------------
     run = get_object_or_404(AnalysisRun, id=run_id)
+
+    # -----------------------------
+    # Rubrics for this assignment
+    # -----------------------------
     rubrics = Rubric.objects.filter(assignment_id=run.assignment_id).order_by("id")
 
-    # ------------------------------------------------------------
-    # Determine rubric to visualize (robust)
-    # ------------------------------------------------------------
-    viz_rubric_id = None
     rid_param = request.GET.get("rubric_id")
-
+    viz_rubric_id = None
     if rid_param:
         try:
             viz_rubric_id = int(rid_param)
         except ValueError:
             viz_rubric_id = None
-
     if not viz_rubric_id and rubrics.exists():
         viz_rubric_id = rubrics.first().id
 
-    default_rubric_id = viz_rubric_id
+    default_rubric_id = viz_rubric_id  # always set for template safety
 
-    # ------------------------------------------------------------
-    # Artifacts (safe for empty runs)
-    # ------------------------------------------------------------
+    # -----------------------------
+    # Artifacts (models/plots/etc.)
+    # -----------------------------
     artifact_rows = []
-
-    artifacts = (
-        ModelArtifact.objects
-        .filter(analysis_run=run)
-        .order_by("-created_at")
-    )
+    artifacts = ModelArtifact.objects.filter(analysis_run=run).order_by("-created_at")
 
     for a in artifacts:
-        metrics = a.metrics or {}
-        cv = metrics.get("cv_metrics", {})
-        paths = metrics.get("paths", {})
+        m = a.metrics or {}
+        cv = (m.get("cv_metrics") or {})
+
+        # These keys are based on the updated train_models.py I gave you:
+        model_url = m.get("model_joblib_url")  # may be None
+        oof_csv_url = m.get("oof_predictions_csv_url")  # used for error analysis
+
+        # Keep backward compatibility with your older dashboard fields (if any):
+        pred_url = m.get("pred_vs_actual_url") or m.get("pred_plot_url") or m.get("pred_url")
+        fi_url = m.get("feature_importance_url") or m.get("fi_plot_url") or m.get("fi_url")
 
         artifact_rows.append({
-            "id": a.id,
             "name": a.name,
+            "created_at": a.created_at,
             "mae": cv.get("mae_mean"),
             "rmse": cv.get("rmse_mean"),
             "r2": cv.get("r2_mean"),
-            "model_url": paths.get("model"),
-            "pred_url": paths.get("pred_vs_actual"),
-            "fi_url": paths.get("feature_importance"),
+            "model_url": model_url,
+            "pred_url": pred_url,
+            "fi_url": fi_url,
+            "oof_csv_url": oof_csv_url,
         })
+        
 
-    # ------------------------------------------------------------
-    # Rubric aggregates lookup (depth, ai_use)
-    # ------------------------------------------------------------
-    label_map = {}
+    # -----------------------------
+    # Clustering (UMAP points + summary)
+    # -----------------------------
+    cluster_points = []
+    cluster_summary = []
+
     if viz_rubric_id:
-        targets = aggregate_rubric_scores(
-            assignment_id=run.assignment_id,
-            rubric_id=viz_rubric_id,
-        )
-        for t in targets:
-            label_map[t["submission_id"]] = {
-                "depth": t.get("depth_score_mean"),
-                "ai_use": t.get("self_report_ai_use"),
-            }
-
-    # ------------------------------------------------------------
-    # Centroid similarity lookup
-    # ------------------------------------------------------------
-    sim_lookup = {}
-    for f in SubmissionFeatures.objects.filter(analysis_run=run):
-        sim = (f.features or {}).get("centroid_similarity")
-        if sim is not None:
-            sim_lookup[str(f.submission_id)] = float(sim)
-
-    # ------------------------------------------------------------
-    # Cluster label lookup (human labels)
-    # ------------------------------------------------------------
-    label_lookup = {}
-    if viz_rubric_id:
-        for cp in ClusterProfile.objects.filter(
-            analysis_run=run,
-            rubric_id=viz_rubric_id
-        ):
+        # Cluster labels lookup
+        label_lookup = {}
+        for cp in ClusterProfile.objects.filter(analysis_run=run, rubric_id=viz_rubric_id):
             label_lookup[int(cp.cluster)] = cp.label
 
-    # ------------------------------------------------------------
-    # Build cluster points for UMAP
-    # ------------------------------------------------------------
-    cluster_points = []
+        # Rubric aggregates for overlay (depth, ai_use, etc.)
+        agg_rows = aggregate_rubric_scores(assignment_id=run.assignment_id, rubric_id=viz_rubric_id)
+        agg_map = {r["submission_id"]: r for r in agg_rows}
 
-    clusters_qs = ClusteringResult.objects.filter(
-        analysis_run=run,
-        rubric_id=viz_rubric_id
-    ).order_by("cluster", "submission_id")
+        # centroid_similarity lookup
+        sim_lookup = {}
+        for sf in SubmissionFeatures.objects.filter(analysis_run=run):
+            sim = (sf.features or {}).get("centroid_similarity")
+            if sim is not None:
+                sim_lookup[str(sf.submission_id)] = float(sim)
 
-    for c in clusters_qs:
-        sid = str(c.submission_id)
-        info = label_map.get(sid, {})
+        # clustering rows
+        cqs = ClusteringResult.objects.filter(analysis_run=run, rubric_id=viz_rubric_id)
 
-        cluster_points.append({
-            "submission_id": sid,
-            "student": c.student_anon_id,
-            "cluster": int(c.cluster),
-            "cluster_label": label_lookup.get(int(c.cluster), f"Cluster {c.cluster}"),
-            "x": c.umap_x,
-            "y": c.umap_y,
-            "depth": info.get("depth"),
-            "ai_use": info.get("ai_use"),
-            "centroid_similarity": sim_lookup.get(sid),
-        })
+        # build points
+        for c in cqs:
+            sid = str(c.submission_id)
+            info = agg_map.get(sid, {})
 
-    # ------------------------------------------------------------
-    # Cluster summary (counts + means)
-    # ------------------------------------------------------------
-    summary = {}
+            depth = info.get("depth_score_mean")
+            ai_use = info.get("self_report_ai_use")
 
-    for p in cluster_points:
-        c = p["cluster"]
-        summary.setdefault(c, {
-            "cluster": c,
-            "label": p["cluster_label"],
-            "count": 0,
-            "students": set(),
-            "depth_vals": [],
-            "ai_vals": [],
-            "sim_vals": [],
-        })
+            cluster_points.append({
+                "submission_id": sid,
+                "student": c.student_anon_id,
+                "cluster": int(c.cluster),
+                "cluster_label": label_lookup.get(int(c.cluster), f"Cluster {c.cluster}"),
+                "x": float(c.umap_x),
+                "y": float(c.umap_y),
+                "depth": float(depth) if depth is not None else None,
+                "ai_use": int(ai_use) if ai_use is not None else None,
+                "centroid_similarity": sim_lookup.get(sid),
+            })
 
-        summary[c]["count"] += 1
-        summary[c]["students"].add(p["student"])
+        # build summary
+        tmp = {}
+        for p in cluster_points:
+            k = p["cluster"]
+            if k not in tmp:
+                tmp[k] = {
+                    "cluster": k,
+                    "cluster_label": p.get("cluster_label", f"Cluster {k}"),
+                    "count": 0,
+                    "students": set(),
+                    "depth_vals": [],
+                    "ai_vals": [],
+                    "sim_vals": [],
+                }
+            tmp[k]["count"] += 1
+            tmp[k]["students"].add(p.get("student"))
 
-        if p.get("depth") is not None:
-            summary[c]["depth_vals"].append(float(p["depth"]))
+            if p.get("depth") is not None:
+                tmp[k]["depth_vals"].append(float(p["depth"]))
+            if p.get("ai_use") is not None:
+                tmp[k]["ai_vals"].append(float(p["ai_use"]))
+            if p.get("centroid_similarity") is not None:
+                tmp[k]["sim_vals"].append(float(p["centroid_similarity"]))
 
-        if p.get("ai_use") is not None:
+        for k in sorted(tmp.keys()):
+            item = tmp[k]
+            depth_mean = (sum(item["depth_vals"]) / len(item["depth_vals"])) if item["depth_vals"] else None
+            ai_mean = (sum(item["ai_vals"]) / len(item["ai_vals"])) if item["ai_vals"] else None
+            sim_mean = (sum(item["sim_vals"]) / len(item["sim_vals"])) if item["sim_vals"] else None
+
+            cluster_summary.append({
+                "cluster": item["cluster"],
+                "cluster_label": item["cluster_label"],
+                "count": item["count"],
+                "unique_students": len(item["students"]),
+                "depth_mean": depth_mean,
+                "ai_use_mean": ai_mean,
+                "sim_mean": sim_mean,
+            })
+
+    # -----------------------------
+    # Cluster stats artifact + auto results paragraph
+    # -----------------------------
+    cluster_stats = None
+    cluster_stats_json_url = None
+    cluster_stats_csv_url = None
+    results_paragraph = None
+
+    stats_json_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.json"
+    stats_csv_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.csv"
+
+    if stats_json_path.exists():
+        try:
+            with open(stats_json_path, "r", encoding="utf-8") as f:
+                cluster_stats = json.load(f)
+            cluster_stats_json_url = f"{settings.MEDIA_URL.rstrip('/')}/artifacts/cluster_stats_{run.id}.json"
+        except Exception:
+            cluster_stats = None
+
+    if stats_csv_path.exists():
+        cluster_stats_csv_url = f"{settings.MEDIA_URL.rstrip('/')}/artifacts/cluster_stats_{run.id}.csv"
+
+    def _format_p(p):
+        try:
+            p = float(p)
+        except Exception:
+            return "—"
+        if p < 0.001:
+            return "< .001"
+        return f"= {p:.3f}"
+
+    if cluster_stats:
+        target = cluster_stats.get("target", "depth_score_mean")
+        kw = cluster_stats.get("kruskal", {})
+        H = kw.get("H")
+        pval = kw.get("p_value")
+
+        desc = cluster_stats.get("descriptive", {})
+        desc_items = []
+        for cid, d in desc.items():
             try:
-                summary[c]["ai_vals"].append(float(p["ai_use"]))
+                cid_int = int(cid)
             except Exception:
-                pass
+                cid_int = cid
+            label = d.get("label", f"Cluster {cid}")
+            n = d.get("n")
+            mean = d.get("mean")
+            median = d.get("median")
+            if n is None or mean is None or median is None:
+                continue
+            desc_items.append((cid_int, label, n, float(mean), float(median)))
+        desc_items.sort(key=lambda x: x[0])
 
-        if p.get("centroid_similarity") is not None:
-            summary[c]["sim_vals"].append(float(p["centroid_similarity"]))
+        desc_text = "; ".join(
+            [f"{label} (n={n}, mean={mean:.2f}, median={median:.2f})"
+             for _, label, n, mean, median in desc_items]
+        )
 
-    cluster_summary = []
-    for c in sorted(summary.keys()):
-        item = summary[c]
+        pairwise = cluster_stats.get("pairwise", [])
+        sig_pairs = [x for x in pairwise if bool(x.get("significant_bonferroni"))]
 
-        cluster_summary.append({
-            "cluster": item["cluster"],
-            "label": item["label"],
-            "count": item["count"],
-            "unique_students": len(item["students"]),
-            "depth_mean": (
-                sum(item["depth_vals"]) / len(item["depth_vals"])
-                if item["depth_vals"] else None
-            ),
-            "ai_use_mean": (
-                sum(item["ai_vals"]) / len(item["ai_vals"])
-                if item["ai_vals"] else None
-            ),
-            "sim_mean": (
-                sum(item["sim_vals"]) / len(item["sim_vals"])
-                if item["sim_vals"] else None
-            ),
-        })
-
-        # ---- Load cluster stats artifact if present ----
-        cluster_stats = None
-        cluster_stats_json_url = None
-        cluster_stats_csv_url = None
-
-        stats_json_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.json"
-        stats_csv_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.csv"
-
-        if stats_json_path.exists():
+        if H is not None and pval is not None:
             try:
-                with open(stats_json_path, "r", encoding="utf-8") as f:
-                    cluster_stats = json.load(f)
-                cluster_stats_json_url = f"{settings.MEDIA_URL}artifacts/cluster_stats_{run.id}.json"
+                p_float = float(pval)
             except Exception:
-                cluster_stats = None
+                p_float = 1.0
 
-        if stats_csv_path.exists():
-            cluster_stats_csv_url = f"{settings.MEDIA_URL}artifacts/cluster_stats_{run.id}.csv"
-
-        def _format_p(p):
-            try:
-                p = float(p)
-            except Exception:
-                return "—"
-            if p < 0.001:
-                return "< .001"
-            return f"= {p:.3f}"
-
-        results_paragraph = None
-
-        if cluster_stats:
-            target = cluster_stats.get("target", "depth_score_mean")
-            kw = cluster_stats.get("kruskal", {})
-            H = kw.get("H")
-            p = kw.get("p_value")
-
-            # Build cluster descriptive summary in label order
-            desc = cluster_stats.get("descriptive", {})  # keys might be "0","1","2"
-            # normalize to list
-            desc_items = []
-            for k, v in desc.items():
-                # k may be string cluster id
-                label = v.get("label", f"Cluster {k}")
-                n = v.get("n")
-                mean = v.get("mean")
-                median = v.get("median")
-                desc_items.append((int(k), label, n, mean, median))
-            desc_items.sort(key=lambda x: x[0])
-
-            desc_text = "; ".join(
-                [f"{label} (n={n}, mean={mean:.2f}, median={median:.2f})"
-                for _, label, n, mean, median in desc_items
-                if n is not None and mean is not None and median is not None]
-            )
-
-            # Pairwise significant comparisons
-            pairwise = cluster_stats.get("pairwise", [])
-            sig_pairs = [x for x in pairwise if x.get("significant_bonferroni")]
-
-            # Paragraph
-            if H is not None and p is not None:
-                if float(p) < 0.05:
-                    # Summarize significant pairs
-                    if sig_pairs:
-                        pairs_text = "; ".join(
-                            [f"{sp.get('label_a')} vs {sp.get('label_b')} (p {_format_p(sp.get('p_value'))})"
-                            for sp in sig_pairs]
-                        )
-                        posthoc_sentence = (
-                            f"Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction indicated significant "
-                            f"differences for: {pairs_text}."
-                        )
-                    else:
-                        posthoc_sentence = (
-                            "Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction did not identify any "
-                            "pairwise comparisons that remained significant."
-                        )
-
-                    results_paragraph = (
-                        f"Cluster analysis showed statistically significant differences in {target} across labeled clusters "
-                        f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(p)}). "
-                        f"Descriptive statistics were: {desc_text}. "
-                        f"{posthoc_sentence}"
+            if p_float < 0.05:
+                if sig_pairs:
+                    pairs_text = "; ".join(
+                        [f"{sp.get('label_a')} vs {sp.get('label_b')} (p {_format_p(sp.get('p_value'))})"
+                         for sp in sig_pairs]
+                    )
+                    posthoc = (
+                        "Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction indicated significant "
+                        f"differences for: {pairs_text}."
                     )
                 else:
-                    results_paragraph = (
-                        f"Cluster analysis did not find statistically significant differences in {target} across labeled clusters "
-                        f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(p)}). "
-                        f"Descriptive statistics were: {desc_text}."
+                    posthoc = (
+                        "Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction did not identify any "
+                        "pairwise comparisons that remained significant."
                     )
 
+                results_paragraph = (
+                    f"Cluster analysis showed statistically significant differences in {target} across labeled clusters "
+                    f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(pval)}). "
+                    f"Descriptive statistics were: {desc_text}. {posthoc}"
+                )
+            else:
+                results_paragraph = (
+                    f"Cluster analysis did not find statistically significant differences in {target} across labeled clusters "
+                    f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(pval)}). "
+                    f"Descriptive statistics were: {desc_text}."
+                )
 
-    # ------------------------------------------------------------
-    # Render (ALL variables ALWAYS defined)
-    # ------------------------------------------------------------
-    return render(
-        request,
-        "analysis/run_dashboard.html",
-        {
-            "run": run,
-            "rubrics": rubrics,
-            "viz_rubric_id": viz_rubric_id,
-            "default_rubric_id": default_rubric_id,
-            "artifact_rows": artifact_rows,
-            "cluster_points": cluster_points,
-            "cluster_summary": cluster_summary,
-            "cluster_stats": cluster_stats,
-            "cluster_stats_json_url": cluster_stats_json_url,
-            "cluster_stats_csv_url": cluster_stats_csv_url,
-            "results_paragraph": results_paragraph,
+    # -----------------------------
+    # Error analysis tables (Top over/under from OOF predictions CSV)
+    # -----------------------------
+    error_tables = []
 
+    def media_url_to_path(url: str) -> Path:
+        # url like "/media/artifacts/<run>/<file>.csv"
+        rel = url.replace(settings.MEDIA_URL, "").lstrip("/")
+        return Path(settings.MEDIA_ROOT) / rel
 
-        }
-    )
+    # pandas optional (we'll try; if not available, skip gracefully)
+    try:
+        import pandas as pd  # noqa
+        pandas_ok = True
+    except Exception:
+        pandas_ok = False
 
+    if pandas_ok:
+        for a in artifact_rows:
+            oof_url = a.get("oof_csv_url")
+            if not oof_url:
+                continue
+
+            csv_path = media_url_to_path(oof_url)
+            if not csv_path.exists():
+                continue
+
+            try:
+                pdf = pd.read_csv(csv_path)
+            except Exception:
+                continue
+
+            if "error" not in pdf.columns:
+                continue
+
+            top_over = pdf.sort_values("error", ascending=False).head(5).to_dict(orient="records")
+            top_under = pdf.sort_values("error", ascending=True).head(5).to_dict(orient="records")
+
+            error_tables.append({
+                "model_name": a.get("name"),
+                "oof_url": oof_url,
+                "top_over": top_over,
+                "top_under": top_under,
+            })
+
+    # -----------------------------
+    # Assignment display (safe)
+    # -----------------------------
+    assignment_obj = getattr(run, "assignment", None)
+    assignment_display = None
+    if assignment_obj is not None:
+        assignment_display = getattr(assignment_obj, "title", None) or getattr(assignment_obj, "name", None) or str(assignment_obj)
+    else:
+        assignment_display = f"Assignment {run.assignment_id}"
+
+    return render(request, "analysis/run_dashboard.html", {
+        "run": run,
+        "assignment_display": assignment_display,
+
+        "rubrics": rubrics,
+        "viz_rubric_id": viz_rubric_id,
+        "default_rubric_id": default_rubric_id,
+
+        "artifact_rows": artifact_rows,
+
+        "cluster_points": cluster_points,
+        "cluster_summary": cluster_summary,
+
+        "cluster_stats": cluster_stats,
+        "cluster_stats_json_url": cluster_stats_json_url,
+        "cluster_stats_csv_url": cluster_stats_csv_url,
+        "results_paragraph": results_paragraph,
+
+        "error_tables": error_tables,
+    })
 
 @login_required
 @role_required({"ADMIN", "RESEARCHER"})

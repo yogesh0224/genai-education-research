@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Any
 import pandas as pd
 
 from analysis.models import AnalysisRun, SubmissionFeatures
 from rubrics.aggregation import aggregate_rubric_scores
+
+
+def _extract_submission_text(submission: Any) -> str:
+    """
+    Best-effort extraction of a submission's answer text.
+    We try common field names; if none exist, return empty string.
+
+    Update this list if your Submission model uses a different field name.
+    """
+    if submission is None:
+        return ""
+
+    candidate_fields = [
+        "text",
+        "answer_text",
+        "answer",
+        "response",
+        "response_text",
+        "content",
+        "body",
+        "submission_text",
+        "student_answer",
+        "raw_text",
+    ]
+
+    for field in candidate_fields:
+        if hasattr(submission, field):
+            val = getattr(submission, field)
+            # Skip callables (methods/properties that need args)
+            if callable(val):
+                continue
+            if val is None:
+                return ""
+            return str(val)
+
+    # Nothing found
+    return ""
 
 
 def build_training_frame(
@@ -19,9 +56,11 @@ def build_training_frame(
     Returns a dataframe joined on submission_id:
       - Targets from aggregate_rubric_scores(...)
       - Feature dict from SubmissionFeatures.features
+      - NEW: submission raw text column for TF-IDF baseline
 
     Columns include:
       - submission_id, student_anon_id, y, group
+      - text (string, may be empty)
       - feat_* columns
 
     Notes:
@@ -37,7 +76,7 @@ def build_training_frame(
     # Map by submission_id (string UUID)
     target_map = {t["submission_id"]: t for t in targets}
 
-    # 2) Load features for this run
+    # 2) Load features for this run (+ submission object)
     feats_qs = (
         SubmissionFeatures.objects
         .filter(analysis_run=run)
@@ -46,8 +85,18 @@ def build_training_frame(
     )
 
     rows = []
+    text_map = {}  # submission_id -> submission text
+
     for f in feats_qs:
         sid = str(f.submission_id)
+
+        # Build text map from the related submission (if present)
+        if sid not in text_map:
+            try:
+                text_map[sid] = _extract_submission_text(getattr(f, "submission", None))
+            except Exception:
+                text_map[sid] = ""
+
         t = target_map.get(sid)
         if not t:
             # features exist but no labels -> skip
@@ -86,6 +135,9 @@ def build_training_frame(
 
     if df.empty:
         return df
+
+    # 2.5) NEW: attach text column using submission_id -> text mapping
+    df["text"] = df["submission_id"].map(text_map).fillna("").astype(str)
 
     # 3) Clean up types
     # Ensure y numeric

@@ -169,6 +169,50 @@
 {% endif %}
 
 <hr/>
+<h3>Error Analysis (Out-of-Fold Predictions)</h3>
+
+{% if error_tables %}
+  {% for t in error_tables %}
+    <h4>{{ t.model_name }}</h4>
+    <p><a href="{{ t.oof_url }}" target="_blank">Download OOF predictions CSV</a></p>
+
+    <table border="1" cellpadding="8" style="margin-bottom:12px;">
+      <tr><th colspan="5">Top Over-Predicted (predicted &gt; actual)</th></tr>
+      <tr>
+        <th>Submission</th><th>Student</th><th>Actual</th><th>Predicted</th><th>Error</th>
+      </tr>
+      {% for r in t.top_over %}
+      <tr>
+        <td style="font-family:monospace;">{{ r.submission_id }}</td>
+        <td>{{ r.student_anon_id }}</td>
+        <td>{{ r.actual|floatformat:3 }}</td>
+        <td>{{ r.predicted|floatformat:3 }}</td>
+        <td>{{ r.error|floatformat:3 }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <table border="1" cellpadding="8">
+      <tr><th colspan="5">Top Under-Predicted (predicted &lt; actual)</th></tr>
+      <tr>
+        <th>Submission</th><th>Student</th><th>Actual</th><th>Predicted</th><th>Error</th>
+      </tr>
+      {% for r in t.top_under %}
+      <tr>
+        <td style="font-family:monospace;">{{ r.submission_id }}</td>
+        <td>{{ r.student_anon_id }}</td>
+        <td>{{ r.actual|floatformat:3 }}</td>
+        <td>{{ r.predicted|floatformat:3 }}</td>
+        <td>{{ r.error|floatformat:3 }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% endfor %}
+{% else %}
+  <p>No error-analysis files found yet. Re-run training to generate OOF prediction CSVs.</p>
+{% endif %}
+
+<hr/>
 
 <h3>UMAP: Learning Behavior Clusters</h3>
 
@@ -312,6 +356,8 @@
 <h3>Cluster Statistical Tests</h3>
 
 {% if cluster_stats %}
+
+  <!-- Download links -->
   <p>
     {% if cluster_stats_json_url %}
       <a href="{{ cluster_stats_json_url }}" target="_blank">Download JSON</a>
@@ -321,20 +367,19 @@
       <a href="{{ cluster_stats_csv_url }}" target="_blank">Download CSV</a>
     {% endif %}
   </p>
-{% if results_paragraph %}
-  <h4>Results paragraph (copy/paste)</h4>
-  <textarea rows="6" style="width:100%; max-width:1100px;">{{ results_paragraph }}</textarea>
-{% endif %}
 
-
-  <h4>Kruskal–Wallis test ({{ cluster_stats.target }})</h4>
+  <!-- Kruskal–Wallis -->
+  <h4>Kruskal–Wallis Test ({{ cluster_stats.target }})</h4>
   <p>
-    <b>H:</b> {{ cluster_stats.kruskal.H|floatformat:4 }}
+    <b>H:</b> {{ cluster_stats.kruskal.H|floatformat:3 }}
     &nbsp;&nbsp;
     <b>p:</b> {{ cluster_stats.kruskal.p_value|floatformat:6 }}
+    &nbsp;&nbsp;
+    <b>ε²:</b> {{ cluster_stats.kruskal.epsilon_squared|floatformat:3 }}
   </p>
 
-  <h4>Descriptive statistics</h4>
+  <!-- Descriptive statistics -->
+  <h4>Descriptive Statistics by Cluster</h4>
   <table border="1" cellpadding="8">
     <tr>
       <th>Cluster</th>
@@ -356,21 +401,25 @@
     {% endfor %}
   </table>
 
-  <h4>Pairwise Mann–Whitney U (Bonferroni)</h4>
+  <!-- Pairwise comparisons -->
+  <h4>Pairwise Mann–Whitney U Tests (Bonferroni corrected)</h4>
   <table border="1" cellpadding="8">
     <tr>
-      <th>A</th>
-      <th>B</th>
+      <th>Cluster A</th>
+      <th>Cluster B</th>
       <th>U</th>
       <th>p</th>
+      <th>RBC</th>
       <th>Significant?</th>
     </tr>
+
     {% for p in cluster_stats.pairwise %}
       <tr {% if p.significant_bonferroni %}style="background:#d9ffd9;"{% endif %}>
         <td>{{ p.label_a }}</td>
         <td>{{ p.label_b }}</td>
         <td>{{ p.u_stat|floatformat:3 }}</td>
         <td>{{ p.p_value|floatformat:6 }}</td>
+        <td>{{ p.rank_biserial_r|floatformat:3 }}</td>
         <td>
           {% if p.significant_bonferroni %}
             <b style="color:green;">YES</b>
@@ -384,7 +433,7 @@
 
 {% else %}
   <p>
-    No cluster stats found yet.
+    No cluster statistics found yet.<br/>
     Run:
     <code>python manage.py cluster_stats {{ run.id }} --rubric_id={{ viz_rubric_id }}</code>
   </p>

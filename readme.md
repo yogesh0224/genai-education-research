@@ -1,24 +1,23 @@
-# Generative AI & Education Research Platform
+# Evaluating the Impact of Generative AI on Student Learning Outcomes
 
-A Django-based research platform to evaluate the impact of generative AI on student learning outcomes.
+This project investigates how access to generative AI tools affects student learning outcomes using
+rubric-based human evaluation, NLP feature extraction, machine learning, clustering, and statistical analysis.
 
 ## Features
-- CSV ingestion of student submissions
-- Rubric-based human scoring
-- Feature extraction (NLP + similarity metrics)
-- Group-aware ML training (student-level CV)
-- UMAP clustering of learning behaviors
-- Interactive dashboard with Plotly visualizations
+- Django-based research platform
+- Rubric scoring interface
+- Feature extraction + ML baselines
+- Group-aware cross-validation
+- Clustering + UMAP visualization
+- Statistical testing with effect sizes
+- Reproducible analysis runs
 
 ## Tech Stack
-- Django
+- Python, Django
 - scikit-learn
-- UMAP
-- Plotly
-- PostgreSQL / SQLite (dev)
+- pandas, numpy
+- matplotlib, seaborn
+- UMAP-learn
 
 ## Status
-🚧 Active research project (work in progress)
-
-## License
-MIT
+Research pipeline complete. Paper writing in progress.

@@ -16,6 +16,26 @@ from analysis.models import (
 )
 from rubrics.aggregation import aggregate_rubric_scores
 
+def epsilon_squared_kw(H: float, k: int, n: int) -> float:
+    """
+    Kruskal–Wallis effect size (epsilon-squared).
+    Common formula: (H - k + 1) / (n - k)
+    """
+    if n <= k:
+        return 0.0
+    return max(0.0, float((H - (k - 1)) / (n - k)))
+
+def rank_biserial_from_u(u: float, n1: int, n2: int) -> float:
+    """
+    Rank-biserial correlation from Mann–Whitney U.
+    RBC = 1 - 2U/(n1*n2) (when U is the smaller U). We'll compute using min(U, n1*n2-U).
+    Returns in [-1, 1], magnitude is effect size.
+    """
+    if n1 <= 0 or n2 <= 0:
+        return 0.0
+    u_small = min(u, n1 * n2 - u)
+    rbc = 1.0 - (2.0 * u_small) / float(n1 * n2)
+    return float(rbc)
 
 class Command(BaseCommand):
     help = "Run statistical tests comparing rubric depth across clusters"
@@ -85,6 +105,11 @@ class Command(BaseCommand):
         # ---- Kruskal–Wallis ----
         kw_stat, kw_p = kruskal(*cluster_values.values())
 
+        k = len(cluster_values)  # number of clusters with data
+        n = sum(len(v) for v in cluster_values.values())
+        eps2 = epsilon_squared_kw(float(kw_stat), k=k, n=n)
+
+
         results = {
             "run_id": run_id,
             "rubric_id": rubric_id,
@@ -92,6 +117,7 @@ class Command(BaseCommand):
             "kruskal": {
                 "H": float(kw_stat),
                 "p_value": float(kw_p),
+                "epsilon_squared": float(eps2),
             },
             "descriptive": desc,
             "pairwise": [],
@@ -106,14 +132,19 @@ class Command(BaseCommand):
         for a, b in combinations(clusters, 2):
             va = cluster_values[a]
             vb = cluster_values[b]
+            n1 = len(va)
+            n2 = len(vb)
 
             u, p = mannwhitneyu(va, vb, alternative="two-sided")
+            rbc = rank_biserial_from_u(float(u), n1, n2)
 
             results["pairwise"].append({
                 "cluster_a": a,
                 "label_a": label_lookup.get(a),
                 "cluster_b": b,
                 "label_b": label_lookup.get(b),
+                "n_a": n1,
+                "n_b": n2,
                 "u_stat": float(u),
                 "p_value": float(p),
                 "significant_bonferroni": bool(p < alpha_corr),

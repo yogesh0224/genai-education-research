@@ -3,23 +3,23 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
+*.log
+*.sqlite3
 
 # Virtual environment
 venv/
-env/
-.venv/
+.env
 
 # Django
 db.sqlite3
-*.log
-local_settings.py
-.env
+media/
+staticfiles/
 
-# Media / artifacts
-media/artifacts/
-media/*.joblib
-media/*.png
+# ML artifacts
+*.joblib
+*.csv
+*.png
+*.pdf
 
 # OS
 .DS_Store
