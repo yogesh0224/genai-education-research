@@ -308,5 +308,87 @@
   <p><em>No cluster summary available.</em></p>
 {% endif %}
 
+<hr/>
+<h3>Cluster Statistical Tests</h3>
+
+{% if cluster_stats %}
+  <p>
+    {% if cluster_stats_json_url %}
+      <a href="{{ cluster_stats_json_url }}" target="_blank">Download JSON</a>
+    {% endif %}
+    {% if cluster_stats_csv_url %}
+      &nbsp; | &nbsp;
+      <a href="{{ cluster_stats_csv_url }}" target="_blank">Download CSV</a>
+    {% endif %}
+  </p>
+{% if results_paragraph %}
+  <h4>Results paragraph (copy/paste)</h4>
+  <textarea rows="6" style="width:100%; max-width:1100px;">{{ results_paragraph }}</textarea>
+{% endif %}
+
+
+  <h4>Kruskal–Wallis test ({{ cluster_stats.target }})</h4>
+  <p>
+    <b>H:</b> {{ cluster_stats.kruskal.H|floatformat:4 }}
+    &nbsp;&nbsp;
+    <b>p:</b> {{ cluster_stats.kruskal.p_value|floatformat:6 }}
+  </p>
+
+  <h4>Descriptive statistics</h4>
+  <table border="1" cellpadding="8">
+    <tr>
+      <th>Cluster</th>
+      <th>Label</th>
+      <th>n</th>
+      <th>Mean</th>
+      <th>Median</th>
+      <th>Std</th>
+    </tr>
+    {% for cid, d in cluster_stats.descriptive.items %}
+      <tr>
+        <td>{{ cid }}</td>
+        <td>{{ d.label }}</td>
+        <td>{{ d.n }}</td>
+        <td>{{ d.mean|floatformat:3 }}</td>
+        <td>{{ d.median|floatformat:3 }}</td>
+        <td>{{ d.std|floatformat:3 }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+
+  <h4>Pairwise Mann–Whitney U (Bonferroni)</h4>
+  <table border="1" cellpadding="8">
+    <tr>
+      <th>A</th>
+      <th>B</th>
+      <th>U</th>
+      <th>p</th>
+      <th>Significant?</th>
+    </tr>
+    {% for p in cluster_stats.pairwise %}
+      <tr {% if p.significant_bonferroni %}style="background:#d9ffd9;"{% endif %}>
+        <td>{{ p.label_a }}</td>
+        <td>{{ p.label_b }}</td>
+        <td>{{ p.u_stat|floatformat:3 }}</td>
+        <td>{{ p.p_value|floatformat:6 }}</td>
+        <td>
+          {% if p.significant_bonferroni %}
+            <b style="color:green;">YES</b>
+          {% else %}
+            No
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+
+{% else %}
+  <p>
+    No cluster stats found yet.
+    Run:
+    <code>python manage.py cluster_stats {{ run.id }} --rubric_id={{ viz_rubric_id }}</code>
+  </p>
+{% endif %}
+
 </body>
 </html>

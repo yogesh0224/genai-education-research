@@ -1,7 +1,8 @@
 # analysis/views.py
-
+import json
 import csv
 from pathlib import Path
+
 
 from django.conf import settings
 from django.contrib import messages
@@ -213,6 +214,98 @@ def run_dashboard(request, run_id):
             ),
         })
 
+        # ---- Load cluster stats artifact if present ----
+        cluster_stats = None
+        cluster_stats_json_url = None
+        cluster_stats_csv_url = None
+
+        stats_json_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.json"
+        stats_csv_path = Path(settings.MEDIA_ROOT) / "artifacts" / f"cluster_stats_{run.id}.csv"
+
+        if stats_json_path.exists():
+            try:
+                with open(stats_json_path, "r", encoding="utf-8") as f:
+                    cluster_stats = json.load(f)
+                cluster_stats_json_url = f"{settings.MEDIA_URL}artifacts/cluster_stats_{run.id}.json"
+            except Exception:
+                cluster_stats = None
+
+        if stats_csv_path.exists():
+            cluster_stats_csv_url = f"{settings.MEDIA_URL}artifacts/cluster_stats_{run.id}.csv"
+
+        def _format_p(p):
+            try:
+                p = float(p)
+            except Exception:
+                return "—"
+            if p < 0.001:
+                return "< .001"
+            return f"= {p:.3f}"
+
+        results_paragraph = None
+
+        if cluster_stats:
+            target = cluster_stats.get("target", "depth_score_mean")
+            kw = cluster_stats.get("kruskal", {})
+            H = kw.get("H")
+            p = kw.get("p_value")
+
+            # Build cluster descriptive summary in label order
+            desc = cluster_stats.get("descriptive", {})  # keys might be "0","1","2"
+            # normalize to list
+            desc_items = []
+            for k, v in desc.items():
+                # k may be string cluster id
+                label = v.get("label", f"Cluster {k}")
+                n = v.get("n")
+                mean = v.get("mean")
+                median = v.get("median")
+                desc_items.append((int(k), label, n, mean, median))
+            desc_items.sort(key=lambda x: x[0])
+
+            desc_text = "; ".join(
+                [f"{label} (n={n}, mean={mean:.2f}, median={median:.2f})"
+                for _, label, n, mean, median in desc_items
+                if n is not None and mean is not None and median is not None]
+            )
+
+            # Pairwise significant comparisons
+            pairwise = cluster_stats.get("pairwise", [])
+            sig_pairs = [x for x in pairwise if x.get("significant_bonferroni")]
+
+            # Paragraph
+            if H is not None and p is not None:
+                if float(p) < 0.05:
+                    # Summarize significant pairs
+                    if sig_pairs:
+                        pairs_text = "; ".join(
+                            [f"{sp.get('label_a')} vs {sp.get('label_b')} (p {_format_p(sp.get('p_value'))})"
+                            for sp in sig_pairs]
+                        )
+                        posthoc_sentence = (
+                            f"Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction indicated significant "
+                            f"differences for: {pairs_text}."
+                        )
+                    else:
+                        posthoc_sentence = (
+                            "Post-hoc pairwise Mann–Whitney U tests with Bonferroni correction did not identify any "
+                            "pairwise comparisons that remained significant."
+                        )
+
+                    results_paragraph = (
+                        f"Cluster analysis showed statistically significant differences in {target} across labeled clusters "
+                        f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(p)}). "
+                        f"Descriptive statistics were: {desc_text}. "
+                        f"{posthoc_sentence}"
+                    )
+                else:
+                    results_paragraph = (
+                        f"Cluster analysis did not find statistically significant differences in {target} across labeled clusters "
+                        f"(Kruskal–Wallis H={float(H):.2f}, p {_format_p(p)}). "
+                        f"Descriptive statistics were: {desc_text}."
+                    )
+
+
     # ------------------------------------------------------------
     # Render (ALL variables ALWAYS defined)
     # ------------------------------------------------------------
@@ -227,6 +320,12 @@ def run_dashboard(request, run_id):
             "artifact_rows": artifact_rows,
             "cluster_points": cluster_points,
             "cluster_summary": cluster_summary,
+            "cluster_stats": cluster_stats,
+            "cluster_stats_json_url": cluster_stats_json_url,
+            "cluster_stats_csv_url": cluster_stats_csv_url,
+            "results_paragraph": results_paragraph,
+
+
         }
     )
 

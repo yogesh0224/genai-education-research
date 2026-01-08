@@ -15,6 +15,8 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVR
+from sklearn.preprocessing import StandardScaler
 
 from analysis.models import AnalysisRun, ModelArtifact
 from analysis.training_data import build_training_frame
@@ -69,7 +71,9 @@ def train_regression_models(
     # 2) Preprocessing pipeline
     # ------------------------------------------------------------------
     numeric_transformer = Pipeline(
-        steps=[("imputer", SimpleImputer(strategy="median"))]
+        steps=[("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
+                ]
     )
 
     preprocessor = ColumnTransformer(
@@ -82,6 +86,12 @@ def train_regression_models(
     # ------------------------------------------------------------------
     models = {
         "ridge": Ridge(alpha=1.0),
+        "svr": LinearSVR(
+            C=1.0,
+            epsilon=0.0,
+            random_state=random_state,
+            max_iter=20000,
+        ),
         "rf": RandomForestRegressor(
             n_estimators=rf_estimators,
             random_state=random_state,
