@@ -2,14 +2,118 @@
 <html>
 <head>
   <title>Analysis Run Dashboard</title>
+
+  <!-- Plotly -->
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
 
 <h1>Analysis Run Dashboard</h1>
 
+{% if messages %}
+  <ul>
+    {% for message in messages %}
+      <li>{{ message }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+<hr/>
+
+<h3>Run Information</h3>
+
 <p><b>Run ID:</b> {{ run.id }}</p>
-<p><b>Assignment:</b> {{ run.assignment }}</p>
+<p><b>Status:</b> {{ run.status }}</p>
+<p><b>Created:</b> {{ run.created_at|default:run.started_at }}</p>
+
+{% if run.assignment %}
+  <p><b>Assignment:</b> {{ run.assignment }}</p>
+{% else %}
+  <p><b>Assignment ID:</b> {{ run.assignment_id }}</p>
+{% endif %}
+
+<p>
+  <a href="{% url 'analysis:compare_runs' %}?assignment_id={{ run.assignment_id }}">
+    Compare runs for this assignment
+  </a>
+</p>
+
+<hr/>
+
+<h3>Datasets</h3>
+
+{% if rubrics %}
+  <form method="get">
+    <label><b>Rubric:</b></label>
+    <select name="rubric_id" onchange="this.form.submit()">
+      {% for r in rubrics %}
+        <option value="{{ r.id }}"
+          {% if default_rubric_id == r.id %}selected{% endif %}
+        >
+          {{ r.name }} (ID {{ r.id }})
+        </option>
+      {% endfor %}
+    </select>
+  </form>
+
+  {% with rid=default_rubric_id %}
+    {% if rid %}
+      <p>
+        <a href="{% url 'rubrics:export_ml_dataset' run.assignment_id rid %}" target="_blank">
+          Download Targets CSV (Rubric Aggregated)
+        </a>
+      </p>
+
+      <p>
+        <a href="{% url 'analysis:export_joined_ml_dataset' run.id %}?rubric_id={{ rid }}" target="_blank">
+          Download Joined CSV (Features + Targets)
+        </a>
+      </p>
+
+      <p>
+        <a href="{% url 'analysis:export_cluster_labels_csv' run.id %}?rubric_id={{ rid }}" target="_blank">
+          Download Cluster CSV (UMAP + Labels)
+        </a>
+      </p>
+    {% else %}
+      <p><em>Select a rubric to enable downloads.</em></p>
+    {% endif %}
+  {% endwith %}
+{% else %}
+  <p><em>No rubrics available for this assignment.</em></p>
+{% endif %}
+
+<hr/>
+
+<h3>Retrain Models</h3>
+
+{% if default_rubric_id %}
+<form method="post" action="{% url 'analysis:retrain_run' run.id %}">
+  {% csrf_token %}
+  <input type="hidden" name="rubric_id" value="{{ default_rubric_id }}"/>
+
+  <p>
+    <label><b>Target:</b></label>
+    <select name="target">
+      <option value="depth_score_mean">depth_score_mean</option>
+      <option value="total_score_weighted_mean">total_score_weighted_mean</option>
+      <option value="total_score_mean">total_score_mean</option>
+    </select>
+  </p>
+
+  <p>
+    <label>Test size:</label>
+    <input type="text" name="test_size" value="0.2"/>
+    &nbsp;&nbsp;
+    <label>Random state:</label>
+    <input type="text" name="random_state" value="42"/>
+  </p>
+
+  <button type="submit">Retrain Now</button>
+</form>
+{% else %}
+  <p><em>Select a rubric to enable retraining.</em></p>
+{% endif %}
 
 <hr/>
 
@@ -22,138 +126,157 @@
     <th>MAE</th>
     <th>RMSE</th>
     <th>R²</th>
+    <th>Model</th>
     <th>Pred vs Actual</th>
     <th>Feature Importance</th>
   </tr>
+
   {% for a in artifact_rows %}
   <tr>
     <td>{{ a.name }}</td>
-    <td>{{ a.mae|floatformat:3 }}</td>
-    <td>{{ a.rmse|floatformat:3 }}</td>
-    <td>{{ a.r2|floatformat:3 }}</td>
+    <td>{{ a.mae|default:"—" }}</td>
+    <td>{{ a.rmse|default:"—" }}</td>
+    <td>{{ a.r2|default:"—" }}</td>
+
+    <td>
+      {% if a.model_url %}
+        <a href="{{ a.model_url }}" target="_blank">Download</a>
+      {% else %}—{% endif %}
+    </td>
+
     <td>
       {% if a.pred_url %}
-        <img src="{{ a.pred_url }}" style="max-width:300px;">
-      {% endif %}
+        <img src="{{ a.pred_url }}" style="max-width:300px;"/>
+      {% else %}—{% endif %}
     </td>
+
     <td>
       {% if a.fi_url %}
-        <img src="{{ a.fi_url }}" style="max-width:300px;">
-      {% endif %}
+        <img src="{{ a.fi_url }}" style="max-width:300px;"/>
+      {% else %}—{% endif %}
     </td>
   </tr>
   {% endfor %}
 </table>
 {% else %}
-<p>No artifacts yet.</p>
+  <p><em>No artifacts yet for this run.</em></p>
 {% endif %}
 
 <hr/>
 
 <h3>UMAP: Learning Behavior Clusters</h3>
 
-<p>
-  <b>Color by:</b>
-  <select id="colorBy">
-    <option value="cluster">Cluster ID</option>
-    <option value="label">Cluster label</option>
-    <option value="depth">Depth score</option>
-    <option value="ai_use">AI use</option>
-  </select>
+{% if cluster_points %}
+  <p>
+    <b>Color by:</b>
+    <select id="colorBy">
+      <option value="label" selected>Cluster label</option>
+      <option value="cluster">Cluster ID</option>
+      <option value="depth">Depth score</option>
+      <option value="ai_use">AI use</option>
+    </select>
 
-  &nbsp;&nbsp;
+    &nbsp;&nbsp;
 
-  <b>Filter cluster:</b>
-  <select id="clusterFilter">
-    <option value="all">All</option>
-  </select>
-</p>
+    <b>Filter cluster:</b>
+    <select id="clusterFilter">
+      <option value="all" selected>All</option>
+    </select>
+  </p>
 
-<div id="umapPlot" style="width:100%; max-width:900px; height:520px;"></div>
+  <div id="umapPlot" style="width:100%; max-width:900px; height:520px;"></div>
 
-{{ cluster_points|json_script:"cluster-data" }}
+  {{ cluster_points|json_script:"cluster-data" }}
 
-<script>
-const points = JSON.parse(document.getElementById("cluster-data").textContent);
+  <script>
+    const points = JSON.parse(document.getElementById("cluster-data").textContent);
 
-const colorByEl = document.getElementById("colorBy");
-const filterEl = document.getElementById("clusterFilter");
+    const colorByEl = document.getElementById("colorBy");
+    const filterEl = document.getElementById("clusterFilter");
 
-// populate filter
-[...new Set(points.map(p => p.cluster))].sort().forEach(c => {
-  const o = document.createElement("option");
-  o.value = c;
-  o.textContent = "Cluster " + c;
-  filterEl.appendChild(o);
-});
+    const clusters = [...new Set(points.map(p => p.cluster))].sort((a,b)=>a-b);
+    for (const c of clusters) {
+      const o = document.createElement("option");
+      o.value = String(c);
+      o.textContent = `Cluster ${c}`;
+      filterEl.appendChild(o);
+    }
 
-function filteredPoints() {
-  if (filterEl.value === "all") return points;
-  return points.filter(p => p.cluster == filterEl.value);
-}
+    function filteredPoints() {
+      if (filterEl.value === "all") return points;
+      const cid = Number(filterEl.value);
+      return points.filter(p => p.cluster === cid);
+    }
 
-function renderPlot() {
-  const mode = colorByEl.value;
-  const pts = filteredPoints();
+    function renderPlot() {
+      const pts = filteredPoints();
+      const mode = colorByEl.value;
 
-  if (mode === "label") {
-    const labels = [...new Set(pts.map(p => p.cluster_label))];
-    const traces = labels.map(lbl => {
-      const sub = pts.filter(p => p.cluster_label === lbl);
-      return {
-        x: sub.map(p => p.x),
-        y: sub.map(p => p.y),
+      if (mode === "label") {
+        const labels = [...new Set(pts.map(p => p.cluster_label))];
+        const traces = labels.map(lbl => {
+          const sub = pts.filter(p => p.cluster_label === lbl);
+          return {
+            x: sub.map(p => p.x),
+            y: sub.map(p => p.y),
+            mode: "markers",
+            type: "scatter",
+            name: lbl,
+            marker: { size: 10 },
+            text: sub.map(p =>
+              `Submission: ${p.submission_id}<br>` +
+              `Student: ${p.student}<br>` +
+              `Label: ${p.cluster_label}<br>` +
+              `Depth: ${p.depth ?? "—"}`
+            ),
+            hoverinfo: "text"
+          };
+        });
+        Plotly.react("umapPlot", traces, { xaxis:{title:"UMAP-1"}, yaxis:{title:"UMAP-2"} });
+        return;
+      }
+
+      const values = pts.map(p =>
+        mode === "cluster" ? p.cluster :
+        mode === "depth" ? p.depth :
+        mode === "ai_use" ? p.ai_use : p.cluster
+      );
+
+      Plotly.react("umapPlot", [{
+        x: pts.map(p => p.x),
+        y: pts.map(p => p.y),
         mode: "markers",
         type: "scatter",
-        name: lbl,
-        marker: { size: 10 },
-        text: sub.map(p =>
-          `Submission: ${p.submission_id}<br>
-           Student: ${p.student}<br>
-           ${lbl}<br>
-           Depth: ${p.depth}<br>
-           AI use: ${p.ai_use}<br>
-           Centroid sim: ${p.centroid_similarity}`
+        marker: {
+          size: 10,
+          color: values,
+          colorscale: "Viridis",
+          showscale: true
+        },
+        text: pts.map(p =>
+          `Submission: ${p.submission_id}<br>` +
+          `Student: ${p.student}<br>` +
+          `Label: ${p.cluster_label}<br>` +
+          `Depth: ${p.depth ?? "—"}`
         ),
         hoverinfo: "text"
-      };
-    });
-    Plotly.react("umapPlot", traces, { title: "UMAP Projection" });
-    return;
-  }
+      }], { xaxis:{title:"UMAP-1"}, yaxis:{title:"UMAP-2"} });
+    }
 
-  Plotly.react("umapPlot", [{
-    x: pts.map(p => p.x),
-    y: pts.map(p => p.y),
-    mode: "markers",
-    type: "scatter",
-    marker: {
-      size: 10,
-      color: pts.map(p => p[mode]),
-      colorscale: "Viridis",
-      showscale: true
-    },
-    text: pts.map(p =>
-      `Submission: ${p.submission_id}<br>
-       Student: ${p.student}<br>
-       ${p.cluster_label}<br>
-       Depth: ${p.depth}<br>
-       AI use: ${p.ai_use}<br>
-       Centroid sim: ${p.centroid_similarity}`
-    ),
-    hoverinfo: "text"
-  }], { title: "UMAP Projection" });
-}
+    colorByEl.addEventListener("change", renderPlot);
+    filterEl.addEventListener("change", renderPlot);
+    renderPlot();
+  </script>
 
-renderPlot();
-colorByEl.onchange = renderPlot;
-filterEl.onchange = renderPlot;
-</script>
+{% else %}
+  <p><em>No clustering results yet. Run clustering to view UMAP.</em></p>
+{% endif %}
 
 <hr/>
 
 <h3>Cluster Summary</h3>
 
+{% if cluster_summary %}
 <table border="1" cellpadding="8">
   <tr>
     <th>Cluster</th>
@@ -161,21 +284,23 @@ filterEl.onchange = renderPlot;
     <th># Submissions</th>
     <th># Students</th>
     <th>Mean Depth</th>
-    <th>Mean AI Use</th>
     <th>Mean Centroid Similarity</th>
   </tr>
-  {% for r in cluster_summary %}
-  <tr data-cluster="{{ r.cluster }}">
-    <td>{{ r.cluster }}</td>
-    <td>{{ r.label }}</td>
-    <td>{{ r.count }}</td>
-    <td>{{ r.unique_students }}</td>
-    <td>{{ r.depth_mean|floatformat:2 }}</td>
-    <td>{{ r.ai_use_mean|floatformat:2 }}</td>
-    <td>{{ r.sim_mean|floatformat:3 }}</td>
+
+  {% for row in cluster_summary %}
+  <tr data-cluster="{{ row.cluster }}">
+    <td>{{ row.cluster }}</td>
+    <td>{{ row.label|default:"—" }}</td>
+    <td>{{ row.count }}</td>
+    <td>{{ row.unique_students }}</td>
+    <td>{{ row.depth_mean|floatformat:2|default:"—" }}</td>
+    <td>{{ row.sim_mean|floatformat:3|default:"—" }}</td>
   </tr>
   {% endfor %}
 </table>
+{% else %}
+  <p><em>No cluster summary available.</em></p>
+{% endif %}
 
 </body>
 </html>

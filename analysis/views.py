@@ -8,6 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.db.models import Prefetch
 
 from accounts.decorators import role_required
 from analysis.models import (
@@ -19,7 +20,7 @@ from analysis.models import (
 from analysis.training import train_regression_models
 from rubrics.aggregation import aggregate_rubric_scores
 from rubrics.models import Rubric, RubricCriterion
-from analysis.models import ClusterProfile
+from analysis.models import ClusterProfile, ClusterProfile, SubmissionFeatures
 
 def _to_media_url(file_path: str) -> str:
     """
@@ -42,45 +43,62 @@ def _to_media_url(file_path: str) -> str:
     except Exception:
         return ""
 
-
 @login_required
 @role_required({"ADMIN", "RESEARCHER"})
 def run_dashboard(request, run_id):
+    # ------------------------------------------------------------
+    # Load run + rubrics
+    # ------------------------------------------------------------
     run = get_object_or_404(AnalysisRun, id=run_id)
-
-    # -----------------------------
-    # Rubric selection
-    # -----------------------------
     rubrics = Rubric.objects.filter(assignment_id=run.assignment_id).order_by("id")
 
-    default_rubric_id = rubrics.first().id if rubrics.exists() else None
-    viz_rubric_id = int(request.GET.get("rubric_id", default_rubric_id))
+    # ------------------------------------------------------------
+    # Determine rubric to visualize (robust)
+    # ------------------------------------------------------------
+    viz_rubric_id = None
+    rid_param = request.GET.get("rubric_id")
 
-    # -----------------------------
-    # Artifacts
-    # -----------------------------
-    artifacts = ModelArtifact.objects.filter(
-        analysis_run=run
-    ).order_by("-created_at")
+    if rid_param:
+        try:
+            viz_rubric_id = int(rid_param)
+        except ValueError:
+            viz_rubric_id = None
 
+    if not viz_rubric_id and rubrics.exists():
+        viz_rubric_id = rubrics.first().id
+
+    default_rubric_id = viz_rubric_id
+
+    # ------------------------------------------------------------
+    # Artifacts (safe for empty runs)
+    # ------------------------------------------------------------
     artifact_rows = []
+
+    artifacts = (
+        ModelArtifact.objects
+        .filter(analysis_run=run)
+        .order_by("-created_at")
+    )
+
     for a in artifacts:
-        m = a.metrics or {}
-        cv = m.get("cv_metrics", {})
+        metrics = a.metrics or {}
+        cv = metrics.get("cv_metrics", {})
+        paths = metrics.get("paths", {})
 
         artifact_rows.append({
+            "id": a.id,
             "name": a.name,
             "mae": cv.get("mae_mean"),
             "rmse": cv.get("rmse_mean"),
             "r2": cv.get("r2_mean"),
-            "model_url": m.get("paths", {}).get("model"),
-            "pred_url": m.get("paths", {}).get("pred_vs_actual"),
-            "fi_url": m.get("paths", {}).get("feature_importance"),
+            "model_url": paths.get("model"),
+            "pred_url": paths.get("pred_vs_actual"),
+            "fi_url": paths.get("feature_importance"),
         })
 
-    # -----------------------------
-    # Rubric aggregation (depth + AI use)
-    # -----------------------------
+    # ------------------------------------------------------------
+    # Rubric aggregates lookup (depth, ai_use)
+    # ------------------------------------------------------------
     label_map = {}
     if viz_rubric_id:
         targets = aggregate_rubric_scores(
@@ -93,48 +111,45 @@ def run_dashboard(request, run_id):
                 "ai_use": t.get("self_report_ai_use"),
             }
 
-    # -----------------------------
+    # ------------------------------------------------------------
     # Centroid similarity lookup
-    # -----------------------------
+    # ------------------------------------------------------------
     sim_lookup = {}
     for f in SubmissionFeatures.objects.filter(analysis_run=run):
         sim = (f.features or {}).get("centroid_similarity")
         if sim is not None:
             sim_lookup[str(f.submission_id)] = float(sim)
 
-    # -----------------------------
-    # Cluster labels (human-readable)
-    # -----------------------------
+    # ------------------------------------------------------------
+    # Cluster label lookup (human labels)
+    # ------------------------------------------------------------
     label_lookup = {}
     if viz_rubric_id:
         for cp in ClusterProfile.objects.filter(
             analysis_run=run,
-            rubric_id=viz_rubric_id,
+            rubric_id=viz_rubric_id
         ):
             label_lookup[int(cp.cluster)] = cp.label
 
-    # -----------------------------
-    # Build cluster points
-    # -----------------------------
+    # ------------------------------------------------------------
+    # Build cluster points for UMAP
+    # ------------------------------------------------------------
+    cluster_points = []
+
     clusters_qs = ClusteringResult.objects.filter(
-        analysis_run=run
+        analysis_run=run,
+        rubric_id=viz_rubric_id
     ).order_by("cluster", "submission_id")
 
-    cluster_points = []
     for c in clusters_qs:
         sid = str(c.submission_id)
-
-        cluster_label = label_lookup.get(
-            int(c.cluster), f"Cluster {c.cluster}"
-        )
-
         info = label_map.get(sid, {})
 
         cluster_points.append({
             "submission_id": sid,
             "student": c.student_anon_id,
             "cluster": int(c.cluster),
-            "cluster_label": cluster_label,
+            "cluster_label": label_lookup.get(int(c.cluster), f"Cluster {c.cluster}"),
             "x": c.umap_x,
             "y": c.umap_y,
             "depth": info.get("depth"),
@@ -142,36 +157,42 @@ def run_dashboard(request, run_id):
             "centroid_similarity": sim_lookup.get(sid),
         })
 
-    # -----------------------------
+    # ------------------------------------------------------------
     # Cluster summary (counts + means)
-    # -----------------------------
+    # ------------------------------------------------------------
     summary = {}
+
     for p in cluster_points:
         c = p["cluster"]
-        if c not in summary:
-            summary[c] = {
-                "cluster": c,
-                "count": 0,
-                "students": set(),
-                "depth_vals": [],
-                "ai_vals": [],
-                "sim_vals": [],
-                "label": p["cluster_label"],
-            }
+        summary.setdefault(c, {
+            "cluster": c,
+            "label": p["cluster_label"],
+            "count": 0,
+            "students": set(),
+            "depth_vals": [],
+            "ai_vals": [],
+            "sim_vals": [],
+        })
 
         summary[c]["count"] += 1
         summary[c]["students"].add(p["student"])
 
-        if p["depth"] is not None:
+        if p.get("depth") is not None:
             summary[c]["depth_vals"].append(float(p["depth"]))
-        if p["ai_use"] is not None:
-            summary[c]["ai_vals"].append(float(p["ai_use"]))
-        if p["centroid_similarity"] is not None:
+
+        if p.get("ai_use") is not None:
+            try:
+                summary[c]["ai_vals"].append(float(p["ai_use"]))
+            except Exception:
+                pass
+
+        if p.get("centroid_similarity") is not None:
             summary[c]["sim_vals"].append(float(p["centroid_similarity"]))
 
     cluster_summary = []
     for c in sorted(summary.keys()):
         item = summary[c]
+
         cluster_summary.append({
             "cluster": item["cluster"],
             "label": item["label"],
@@ -191,6 +212,9 @@ def run_dashboard(request, run_id):
             ),
         })
 
+    # ------------------------------------------------------------
+    # Render (ALL variables ALWAYS defined)
+    # ------------------------------------------------------------
     return render(
         request,
         "analysis/run_dashboard.html",
@@ -198,10 +222,11 @@ def run_dashboard(request, run_id):
             "run": run,
             "rubrics": rubrics,
             "viz_rubric_id": viz_rubric_id,
+            "default_rubric_id": default_rubric_id,
             "artifact_rows": artifact_rows,
             "cluster_points": cluster_points,
             "cluster_summary": cluster_summary,
-        },
+        }
     )
 
 
@@ -324,3 +349,160 @@ def export_joined_ml_dataset(request, run_id):
         written += 1
 
     return response
+
+
+@login_required
+@role_required({"ADMIN", "RESEARCHER"})
+def export_cluster_labels_csv(request, run_id):
+    """
+    Export per-submission clustering output + labels + rubric aggregates.
+
+    URL:
+      /export/clusters/<run_uuid>.csv?rubric_id=2
+    """
+    run = get_object_or_404(AnalysisRun, id=run_id)
+
+    rubric_id_raw = request.GET.get("rubric_id")
+    if not rubric_id_raw:
+        return HttpResponse("Missing rubric_id query param, e.g. ?rubric_id=2", status=400)
+    rubric_id = int(rubric_id_raw)
+
+    # Cluster label lookup
+    label_lookup = {}
+    for cp in ClusterProfile.objects.filter(analysis_run=run, rubric_id=rubric_id):
+        label_lookup[int(cp.cluster)] = cp.label
+
+    # Rubric aggregates lookup (depth, ai_use, totals)
+    targets = aggregate_rubric_scores(assignment_id=run.assignment_id, rubric_id=rubric_id)
+    target_map = {t["submission_id"]: t for t in targets}
+
+    # Centroid similarity lookup from SubmissionFeatures
+    sim_lookup = {}
+    for f in SubmissionFeatures.objects.filter(analysis_run=run):
+        sim = (f.features or {}).get("centroid_similarity")
+        if sim is not None:
+            sim_lookup[str(f.submission_id)] = float(sim)
+
+    # Clustering rows
+    qs = ClusteringResult.objects.filter(analysis_run=run, rubric_id=rubric_id).order_by("cluster", "submission_id")
+
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="clusters_{run_id}_rubric_{rubric_id}.csv"'
+
+    fieldnames = [
+        "submission_id",
+        "student_anon_id",
+        "cluster",
+        "cluster_label",
+        "umap_x",
+        "umap_y",
+        "centroid_similarity",
+        "depth_score_mean",
+        "total_score_mean",
+        "total_score_weighted_mean",
+        "self_report_ai_use",
+        "word_count",
+        "submitted_at",
+    ]
+    writer = csv.DictWriter(response, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for c in qs:
+        sid = str(c.submission_id)
+        t = target_map.get(sid, {})
+
+        writer.writerow({
+            "submission_id": sid,
+            "student_anon_id": c.student_anon_id,
+            "cluster": c.cluster,
+            "cluster_label": label_lookup.get(int(c.cluster), f"Cluster {c.cluster}"),
+            "umap_x": c.umap_x,
+            "umap_y": c.umap_y,
+            "centroid_similarity": sim_lookup.get(sid, ""),
+            "depth_score_mean": t.get("depth_score_mean", ""),
+            "total_score_mean": t.get("total_score_mean", ""),
+            "total_score_weighted_mean": t.get("total_score_weighted_mean", ""),
+            "self_report_ai_use": t.get("self_report_ai_use", ""),
+            "word_count": t.get("word_count", ""),
+            "submitted_at": t.get("submitted_at", ""),
+        })
+
+    return response
+
+@login_required
+@role_required({"ADMIN", "RESEARCHER"})
+def compare_runs(request):
+    """
+    Compare runs by assignment (optional) and show latest artifacts per run.
+    URL: /analysis/compare/?assignment_id=1
+    """
+    assignment_id = request.GET.get("assignment_id")
+
+    # Base runs query
+    runs_qs = AnalysisRun.objects.all().order_by("-created_at")
+
+    if assignment_id:
+        try:
+            runs_qs = runs_qs.filter(assignment_id=int(assignment_id))
+        except ValueError:
+            assignment_id = None  # ignore invalid input
+
+    # Pull a manageable number for UI
+    runs = list(runs_qs[:20])
+
+    # Fetch artifacts for these runs
+    run_ids = [r.id for r in runs]
+    artifacts_qs = ModelArtifact.objects.filter(analysis_run_id__in=run_ids).order_by("-created_at")
+
+    # Group artifacts per run, and pick “latest per (model,target)”
+    by_run = {r.id: {} for r in runs}  # run_id -> {(model,target): artifact}
+    for a in artifacts_qs:
+        m = (a.metrics or {})
+        model = m.get("model") or a.name.split(":")[0]  # fallback
+        target = m.get("target") or (a.name.split(":")[1] if ":" in a.name else "")
+        key = (model, target)
+
+        # Keep first encountered because artifacts_qs is newest-first
+        if key not in by_run[a.analysis_run_id]:
+            by_run[a.analysis_run_id][key] = a
+
+    # Build rows for template
+    rows = []
+    for r in runs:
+        artifacts_map = by_run.get(r.id, {})
+        artifacts_view = []
+
+        for (model, target), a in sorted(artifacts_map.items(), key=lambda x: (x[0][0], x[0][1])):
+            metrics = a.metrics or {}
+            cv = metrics.get("cv_metrics") or {}
+
+            artifacts_view.append({
+                "model": model,
+                "target": target,
+                "name": a.name,
+                "created_at": a.created_at,
+                "r2_mean": cv.get("r2_mean"),
+                "r2_std": cv.get("r2_std"),
+                "rmse_mean": cv.get("rmse_mean"),
+                "rmse_std": cv.get("rmse_std"),
+                "mae_mean": cv.get("mae_mean"),
+                "mae_std": cv.get("mae_std"),
+            })
+
+        # Assignment display
+        assignment_display = None
+        if hasattr(r, "assignment") and r.assignment:
+            assignment_display = str(r.assignment)
+        else:
+            assignment_display = f"Assignment {r.assignment_id}"
+
+        rows.append({
+            "run": r,
+            "assignment_display": assignment_display,
+            "artifacts": artifacts_view,
+        })
+
+    return render(request, "analysis/compare_runs.html", {
+        "rows": rows,
+        "assignment_id": assignment_id or "",
+    })

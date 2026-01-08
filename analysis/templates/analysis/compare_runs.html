@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Run Comparison</title>
+</head>
+<body>
+
+<h1>Run Comparison</h1>
+
+<form method="get" style="margin-bottom: 14px;">
+  <label><b>Assignment ID filter:</b></label>
+  <input type="text" name="assignment_id" value="{{ assignment_id }}" />
+  <button type="submit">Filter</button>
+  <a href="{% url 'analysis:compare_runs' %}">Clear</a>
+</form>
+
+{% if rows %}
+  {% for row in rows %}
+    <hr/>
+    <h3>{{ row.assignment_display }}</h3>
+    <p>
+      <b>Run:</b> {{ row.run.id }} |
+      <b>Status:</b> {{ row.run.status }} |
+      <b>Created:</b> {{ row.run.created_at|default:row.run.started_at }}
+      |
+      <a href="{% url 'analysis:run_dashboard' row.run.id %}" target="_blank">Open Dashboard</a>
+    </p>
+
+    {% if row.artifacts %}
+      <table border="1" cellpadding="8">
+        <tr>
+          <th>Model</th>
+          <th>Target</th>
+          <th>R² (mean ± std)</th>
+          <th>RMSE (mean ± std)</th>
+          <th>MAE (mean ± std)</th>
+          <th>Artifact created</th>
+        </tr>
+        {% for a in row.artifacts %}
+          <tr>
+            <td>{{ a.model }}</td>
+            <td>{{ a.target }}</td>
+            <td>
+              {% if a.r2_mean is not None %}
+                {{ a.r2_mean|floatformat:3 }} ± {{ a.r2_std|floatformat:3 }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>
+              {% if a.rmse_mean is not None %}
+                {{ a.rmse_mean|floatformat:3 }} ± {{ a.rmse_std|floatformat:3 }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>
+              {% if a.mae_mean is not None %}
+                {{ a.mae_mean|floatformat:3 }} ± {{ a.mae_std|floatformat:3 }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>{{ a.created_at }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p>No artifacts found for this run.</p>
+    {% endif %}
+
+  {% endfor %}
+{% else %}
+  <p>No runs found.</p>
+{% endif %}
+
+</body>
+</html>
