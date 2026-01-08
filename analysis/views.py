@@ -21,6 +21,7 @@ from analysis.training import train_regression_models
 from rubrics.aggregation import aggregate_rubric_scores
 from rubrics.models import Rubric, RubricCriterion
 from analysis.models import ClusterProfile, ClusterProfile, SubmissionFeatures
+from collections import defaultdict
 
 def _to_media_url(file_path: str) -> str:
     """
@@ -429,72 +430,87 @@ def export_cluster_labels_csv(request, run_id):
 
     return response
 
+
 @login_required
 @role_required({"ADMIN", "RESEARCHER"})
 def compare_runs(request):
     """
-    Compare runs by assignment (optional) and show latest artifacts per run.
-    URL: /analysis/compare/?assignment_id=1
+    Compare runs (optionally filtered by assignment_id) and highlight best run
+    for each (model, target) by highest CV r2_mean.
     """
     assignment_id = request.GET.get("assignment_id")
 
-    # Base runs query
     runs_qs = AnalysisRun.objects.all().order_by("-created_at")
-
     if assignment_id:
         try:
             runs_qs = runs_qs.filter(assignment_id=int(assignment_id))
         except ValueError:
-            assignment_id = None  # ignore invalid input
+            assignment_id = ""
 
-    # Pull a manageable number for UI
-    runs = list(runs_qs[:20])
-
-    # Fetch artifacts for these runs
+    runs = list(runs_qs[:30])
     run_ids = [r.id for r in runs]
-    artifacts_qs = ModelArtifact.objects.filter(analysis_run_id__in=run_ids).order_by("-created_at")
 
-    # Group artifacts per run, and pick “latest per (model,target)”
-    by_run = {r.id: {} for r in runs}  # run_id -> {(model,target): artifact}
+    artifacts_qs = (
+        ModelArtifact.objects
+        .filter(analysis_run_id__in=run_ids)
+        .order_by("-created_at")
+    )
+
+    # Latest artifact per run per (model,target)
+    by_run = {rid: {} for rid in run_ids}
     for a in artifacts_qs:
-        m = (a.metrics or {})
-        model = m.get("model") or a.name.split(":")[0]  # fallback
-        target = m.get("target") or (a.name.split(":")[1] if ":" in a.name else "")
-        key = (model, target)
+        m = a.metrics or {}
+        model = m.get("model")
+        target = m.get("target")
+        if not model or not target:
+            # fallback from "ridge:depth_score_mean"
+            if ":" in a.name:
+                model = model or a.name.split(":")[0]
+                target = target or a.name.split(":")[1]
+        if not model or not target:
+            continue
 
-        # Keep first encountered because artifacts_qs is newest-first
+        key = (model, target)
         if key not in by_run[a.analysis_run_id]:
             by_run[a.analysis_run_id][key] = a
+
+    # Compute best artifact per (model,target) across runs by max r2_mean
+    best_by_key = {}
+    for rid, amap in by_run.items():
+        for key, a in amap.items():
+            cv = (a.metrics or {}).get("cv_metrics") or {}
+            r2_mean = cv.get("r2_mean")
+            if r2_mean is None:
+                continue
+            if key not in best_by_key or r2_mean > best_by_key[key]["r2_mean"]:
+                best_by_key[key] = {"run_id": rid, "r2_mean": r2_mean}
 
     # Build rows for template
     rows = []
     for r in runs:
-        artifacts_map = by_run.get(r.id, {})
+        amap = by_run.get(r.id, {})
         artifacts_view = []
-
-        for (model, target), a in sorted(artifacts_map.items(), key=lambda x: (x[0][0], x[0][1])):
+        for (model, target), a in sorted(amap.items(), key=lambda x: (x[0][0], x[0][1])):
             metrics = a.metrics or {}
             cv = metrics.get("cv_metrics") or {}
+
+            key = (model, target)
+            is_best = (best_by_key.get(key, {}).get("run_id") == r.id)
 
             artifacts_view.append({
                 "model": model,
                 "target": target,
-                "name": a.name,
-                "created_at": a.created_at,
                 "r2_mean": cv.get("r2_mean"),
                 "r2_std": cv.get("r2_std"),
                 "rmse_mean": cv.get("rmse_mean"),
                 "rmse_std": cv.get("rmse_std"),
                 "mae_mean": cv.get("mae_mean"),
                 "mae_std": cv.get("mae_std"),
+                "created_at": a.created_at,
+                "is_best": is_best,
             })
 
-        # Assignment display
-        assignment_display = None
-        if hasattr(r, "assignment") and r.assignment:
-            assignment_display = str(r.assignment)
-        else:
-            assignment_display = f"Assignment {r.assignment_id}"
+        assignment_display = str(getattr(r, "assignment", None) or f"Assignment {r.assignment_id}")
 
         rows.append({
             "run": r,

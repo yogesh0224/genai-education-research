@@ -26,6 +26,12 @@
 <p><b>Status:</b> {{ run.status }}</p>
 <p><b>Created:</b> {{ run.created_at|default:run.started_at }}</p>
 
+<p style="margin-top: 10px;">
+  <a href="{% url 'analysis:compare_runs' %}?assignment_id={{ run.assignment_id }}">
+    Compare runs for this assignment
+  </a>
+</p>
+
 {% if run.assignment %}
   <p><b>Assignment:</b> {{ run.assignment }}</p>
 {% else %}

@@ -18,10 +18,16 @@
   {% for row in rows %}
     <hr/>
     <h3>{{ row.assignment_display }}</h3>
+
     <p>
       <b>Run:</b> {{ row.run.id }} |
       <b>Status:</b> {{ row.run.status }} |
-      <b>Created:</b> {{ row.run.created_at|default:row.run.started_at }}
+      <b>Created:</b>
+      {% if row.run.created_at %}
+        {{ row.run.created_at }}
+      {% else %}
+        {{ row.run.started_at }}
+      {% endif %}
       |
       <a href="{% url 'analysis:run_dashboard' row.run.id %}" target="_blank">Open Dashboard</a>
     </p>
@@ -36,10 +42,17 @@
           <th>MAE (mean ± std)</th>
           <th>Artifact created</th>
         </tr>
+
         {% for a in row.artifacts %}
-          <tr>
-            <td>{{ a.model }}</td>
+          <tr {% if a.is_best %}style="background:#d9ffd9;"{% endif %}>
+            <td>
+              {{ a.model }}
+              {% if a.is_best %}
+                <b style="color:green;">(BEST)</b>
+              {% endif %}
+            </td>
             <td>{{ a.target }}</td>
+
             <td>
               {% if a.r2_mean is not None %}
                 {{ a.r2_mean|floatformat:3 }} ± {{ a.r2_std|floatformat:3 }}
@@ -47,6 +60,7 @@
                 —
               {% endif %}
             </td>
+
             <td>
               {% if a.rmse_mean is not None %}
                 {{ a.rmse_mean|floatformat:3 }} ± {{ a.rmse_std|floatformat:3 }}
@@ -54,6 +68,7 @@
                 —
               {% endif %}
             </td>
+
             <td>
               {% if a.mae_mean is not None %}
                 {{ a.mae_mean|floatformat:3 }} ± {{ a.mae_std|floatformat:3 }}
@@ -61,6 +76,7 @@
                 —
               {% endif %}
             </td>
+
             <td>{{ a.created_at }}</td>
           </tr>
         {% endfor %}
